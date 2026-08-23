@@ -1,6 +1,8 @@
 import { useState, useCallback } from 'react';
-import { analyzeJobListing, getResumeSuggestions, buildTailoredResume } from '../api/client';
-import type { JobListing, MatchResult, ResumeSuggestion, ResumeResult, ApiError } from '../types';
+import { analyzeJobListing, getResumeSuggestions, buildTailoredResume, RateLimitError } from '../api/client';
+import type { JobListing, MatchResult, ResumeSuggestion, ResumeResult } from '../types';
+
+export type { RateLimitError };
 
 interface UseJobDetailsState {
   selectedJob: JobListing | null;
@@ -15,8 +17,10 @@ interface UseJobDetailsState {
   resumeBuildError: string | null;
   selectJob: (job: JobListing) => void;
   closeJob: () => void;
-  runAnalysis: () => Promise<void>;
-  runSuggestions: () => Promise<void>;
+  /** Analyze fit for `job` (or the currently selected job if omitted). Throws RateLimitError. */
+  runAnalysis: (job?: JobListing) => Promise<void>;
+  /** Get resume suggestions for `job` (or the currently selected job if omitted). Throws RateLimitError. */
+  runSuggestions: (job?: JobListing) => Promise<void>;
   runBuildResume: () => Promise<void>;
 }
 
@@ -32,6 +36,9 @@ export function useJobDetails(): UseJobDetailsState {
   const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
   const [resumeBuildError, setResumeBuildError] = useState<string | null>(null);
 
+  // ── helpers ──────────────────────────────────────────────────────────────────
+
+  /** Select a new job, clearing previous results. */
   const selectJob = useCallback((job: JobListing) => {
     setSelectedJob(job);
     setMatchResult(null);
@@ -52,39 +59,78 @@ export function useJobDetails(): UseJobDetailsState {
     setResumeBuildError(null);
   }, []);
 
-  const runAnalysis = useCallback(async () => {
-    if (!selectedJob) return;
+  // ── runAnalysis ───────────────────────────────────────────────────────────────
+
+  const runAnalysis = useCallback(async (jobOverride?: JobListing) => {
+    const job = jobOverride ?? selectedJob;
+    if (!job) return;
+
+    // If a different job was passed, select it (opens modal automatically)
+    if (jobOverride && jobOverride !== selectedJob) {
+      setSelectedJob(jobOverride);
+      setMatchResult(null);
+      setSuggestions(null);
+      setBuiltResume(null);
+      setMatchError(null);
+      setSuggestionsError(null);
+      setResumeBuildError(null);
+    }
+
     setAnalyzingMatch(true);
     setMatchError(null);
     try {
-      const result = await analyzeJobListing(selectedJob);
+      const result = await analyzeJobListing(job);
       setMatchResult(result);
     } catch (err) {
-      const apiErr = err as ApiError;
-      setMatchError(apiErr.detail ?? 'Analysis failed.');
+      if (err instanceof RateLimitError) {
+        setMatchError(`Rate limit reached (${err.used}/${err.limit}). Resets in ${err.resetsInMinutes} min.`);
+        throw err; // propagate to parent for banner
+      }
+      const detail = (err as { detail?: string })?.detail;
+      setMatchError(detail ?? 'Analysis failed.');
     } finally {
       setAnalyzingMatch(false);
     }
   }, [selectedJob]);
 
-  const runSuggestions = useCallback(async () => {
-    if (!selectedJob) return;
+  // ── runSuggestions ────────────────────────────────────────────────────────────
+
+  const runSuggestions = useCallback(async (jobOverride?: JobListing) => {
+    const job = jobOverride ?? selectedJob;
+    if (!job) return;
+
+    // If a different job was passed, select it
+    if (jobOverride && jobOverride !== selectedJob) {
+      setSelectedJob(jobOverride);
+      setMatchResult(null);
+      setSuggestions(null);
+      setBuiltResume(null);
+      setMatchError(null);
+      setSuggestionsError(null);
+      setResumeBuildError(null);
+    }
+
     setAnalyzingSuggestions(true);
     setSuggestionsError(null);
     try {
-      const jobText = `Title: ${selectedJob.title}\nCompany: ${selectedJob.company}\nLocation: ${selectedJob.location}\n\n${selectedJob.description}`;
+      const jobText = `Title: ${job.title}\nCompany: ${job.company}\nLocation: ${job.location}\n\n${job.description}`;
       const result = await getResumeSuggestions(jobText);
       setSuggestions(result);
-      // Reset any previously built resume when new suggestions come in
       setBuiltResume(null);
       setResumeBuildError(null);
     } catch (err) {
-      const apiErr = err as ApiError;
-      setSuggestionsError(apiErr.detail ?? 'Failed to get suggestions.');
+      if (err instanceof RateLimitError) {
+        setSuggestionsError(`Rate limit reached (${err.used}/${err.limit}). Resets in ${err.resetsInMinutes} min.`);
+        throw err;
+      }
+      const detail = (err as { detail?: string })?.detail;
+      setSuggestionsError(detail ?? 'Failed to get suggestions.');
     } finally {
       setAnalyzingSuggestions(false);
     }
   }, [selectedJob]);
+
+  // ── runBuildResume ────────────────────────────────────────────────────────────
 
   const runBuildResume = useCallback(async () => {
     if (!selectedJob || !suggestions) return;
@@ -94,8 +140,12 @@ export function useJobDetails(): UseJobDetailsState {
       const result = await buildTailoredResume({ job: selectedJob, suggestions });
       setBuiltResume(result);
     } catch (err) {
-      const apiErr = err as ApiError;
-      setResumeBuildError(apiErr.detail ?? 'Failed to build resume.');
+      if (err instanceof RateLimitError) {
+        setResumeBuildError(`Rate limit reached (${err.used}/${err.limit}). Resets in ${err.resetsInMinutes} min.`);
+        throw err;
+      }
+      const detail = (err as { detail?: string })?.detail;
+      setResumeBuildError(detail ?? 'Failed to build resume.');
     } finally {
       setBuildingResume(false);
     }

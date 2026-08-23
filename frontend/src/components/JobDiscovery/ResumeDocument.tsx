@@ -356,7 +356,7 @@ export function ResumeDocument({ resume, profile, job }: ResumeDocumentProps) {
 
         {/* ─── Footer ─────────────────────────────────────────── */}
         <View style={S.footer} fixed>
-          <Text style={S.footerText}>AI Job Matcher — Generated resume · Based on profile.md</Text>
+          <Text style={S.footerText}>JobSense — Generated resume · Based on profile.md</Text>
           <Text
             style={S.footerPage}
             render={({ pageNumber, totalPages }) => `${pageNumber} / ${totalPages}`}

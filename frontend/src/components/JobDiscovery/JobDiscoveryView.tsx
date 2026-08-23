@@ -4,9 +4,18 @@ import { useJobDetails } from '../../hooks/useJobDetails';
 import { JobCard } from './JobCard';
 import { JobDetailModal } from './JobDetailModal';
 import { JobSearchConfig } from './JobSearchConfig';
+import { RateLimitBanner } from '../UsageMeter';
 import type { SearchConfig } from '../../hooks/useJobSearch';
+import type { JobListing } from '../../types';
+import { RateLimitError } from '../../api/client';
 
-export function JobDiscoveryView() {
+interface JobDiscoveryViewProps {
+  hasPreferences?: boolean;
+  /** Called after any rate-limited API action so usage meter stays current */
+  onRefreshUsage?: () => void;
+}
+
+export function JobDiscoveryView({ hasPreferences = false, onRefreshUsage }: JobDiscoveryViewProps) {
   const {
     jobs,
     loading,
@@ -14,11 +23,14 @@ export function JobDiscoveryView() {
     page,
     hasNext,
     total,
+    hasSearched,
     searchConfig,
     setSearchConfig,
     fetchJobs,
     nextPage,
     prevPage,
+    rateLimitError: searchRateLimitError,
+    clearRateLimitError,
   } = useJobSearch();
 
   const {
@@ -39,16 +51,68 @@ export function JobDiscoveryView() {
     runBuildResume,
   } = useJobDetails();
 
-  // Whether we've already done a search (show config panel before first search)
-  const [hasSearched, setHasSearched] = useState(false);
+  const [actionRateLimitError, setActionRateLimitError] = useState<RateLimitError | null>(null);
 
-  const handleConfigChange = (config: SearchConfig) => {
-    setSearchConfig(config);
-  };
+  const rateLimitError = actionRateLimitError ?? searchRateLimitError;
+
+  // ── Search handlers ──────────────────────────────────────────────────────────
+
+  const handleConfigChange = (config: SearchConfig) => setSearchConfig(config);
 
   const handleSearch = () => {
-    setHasSearched(true);
-    fetchJobs(1, searchConfig);
+    fetchJobs(1, searchConfig).then(() => onRefreshUsage?.());
+  };
+
+  // ── Card action handlers ──────────────────────────────────────────────────────
+
+  const handleAnalyze = async (job: JobListing) => {
+    try {
+      await runAnalysis(job);
+    } catch (err) {
+      if (err instanceof RateLimitError) setActionRateLimitError(err);
+    } finally {
+      onRefreshUsage?.();
+    }
+  };
+
+  const handleSuggest = async (job: JobListing) => {
+    try {
+      await runSuggestions(job);
+    } catch (err) {
+      if (err instanceof RateLimitError) setActionRateLimitError(err);
+    } finally {
+      onRefreshUsage?.();
+    }
+  };
+
+  const handleRunAnalysis = async () => {
+    try {
+      await runAnalysis();
+    } catch (err) {
+      if (err instanceof RateLimitError) setActionRateLimitError(err);
+    } finally {
+      onRefreshUsage?.();
+    }
+  };
+
+  const handleRunSuggestions = async () => {
+    try {
+      await runSuggestions();
+    } catch (err) {
+      if (err instanceof RateLimitError) setActionRateLimitError(err);
+    } finally {
+      onRefreshUsage?.();
+    }
+  };
+
+  const handleRunBuildResume = async () => {
+    try {
+      await runBuildResume();
+    } catch (err) {
+      if (err instanceof RateLimitError) setActionRateLimitError(err);
+    } finally {
+      onRefreshUsage?.();
+    }
   };
 
   const hasJobs = jobs.length > 0;
@@ -56,7 +120,23 @@ export function JobDiscoveryView() {
   return (
     <div className="space-y-6">
 
-      {/* Config panel — always visible before first search, collapsible after */}
+      {/* Rate limit banner overlay */}
+      {rateLimitError && (
+        <RateLimitBanner
+          usage={{
+            used: rateLimitError.used,
+            limit: rateLimitError.limit,
+            remaining: 0,
+            resets_in_minutes: rateLimitError.resetsInMinutes,
+          }}
+          onDismiss={() => {
+            setActionRateLimitError(null);
+            clearRateLimitError();
+          }}
+        />
+      )}
+
+      {/* Config panel or compact search bar */}
       {!hasSearched ? (
         <JobSearchConfig
           config={searchConfig}
@@ -65,7 +145,6 @@ export function JobDiscoveryView() {
           loading={loading}
         />
       ) : (
-        /* Compact search bar after first search */
         <div className="flex items-center justify-between flex-wrap gap-3 p-4 bg-white rounded-2xl border border-slate-200">
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-sm font-semibold text-slate-700">
@@ -76,9 +155,17 @@ export function JobDiscoveryView() {
                 + career pages
               </span>
             )}
+            {hasPreferences && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full">
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                </svg>
+                Preferences Active
+              </span>
+            )}
             <button
-              onClick={() => setHasSearched(false)}
-              className="text-xs text-blue-600 hover:text-blue-700 font-medium underline underline-offset-2"
+              onClick={() => { clearRateLimitError(); setActionRateLimitError(null); fetchJobs(1, searchConfig); onRefreshUsage?.(); }}
+              className="text-xs text-slate-500 hover:text-slate-700"
             >
               Change settings
             </button>
@@ -109,7 +196,7 @@ export function JobDiscoveryView() {
       )}
 
       {/* Error state */}
-      {error && (
+      {error && !rateLimitError && (
         <div className="p-5 bg-red-50 border border-red-200 rounded-2xl flex items-start gap-3">
           <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -136,9 +223,10 @@ export function JobDiscoveryView() {
                 <div className="h-3 bg-slate-100 rounded w-full" />
                 <div className="h-3 bg-slate-100 rounded w-5/6" />
               </div>
-              <div className="mt-3 flex gap-2">
-                <div className="h-5 bg-slate-100 rounded-full w-16" />
-                <div className="h-5 bg-slate-100 rounded-full w-24" />
+              <div className="mt-3 flex gap-0 border-t border-slate-100 pt-2.5">
+                <div className="flex-1 h-6 bg-slate-100 rounded" />
+                <div className="flex-1 h-6 bg-slate-100 rounded ml-1" />
+                <div className="flex-1 h-6 bg-slate-100 rounded ml-1" />
               </div>
             </div>
           ))}
@@ -148,7 +236,6 @@ export function JobDiscoveryView() {
       {/* Job list */}
       {!loading && hasJobs && (
         <>
-          {/* Results count */}
           <div className="flex items-center justify-between text-sm text-slate-500">
             <span>
               Showing page <strong className="text-slate-700">{page}</strong>
@@ -156,7 +243,6 @@ export function JobDiscoveryView() {
             </span>
           </div>
 
-          {/* Cards */}
           <div className="space-y-3">
             {jobs.map((job) => (
               <JobCard
@@ -164,6 +250,8 @@ export function JobDiscoveryView() {
                 job={job}
                 matchResult={null}
                 onClick={selectJob}
+                onAnalyze={handleAnalyze}
+                onSuggest={handleSuggest}
               />
             ))}
           </div>
@@ -219,9 +307,9 @@ export function JobDiscoveryView() {
           suggestionsError={suggestionsError}
           resumeBuildError={resumeBuildError}
           onClose={closeJob}
-          onAnalyze={runAnalysis}
-          onSuggest={runSuggestions}
-          onBuildResume={runBuildResume}
+          onAnalyze={handleRunAnalysis}
+          onSuggest={handleRunSuggestions}
+          onBuildResume={handleRunBuildResume}
         />
       )}
     </div>

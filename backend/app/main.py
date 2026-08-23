@@ -1,14 +1,15 @@
 """
-FastAPI application factory.
+FastAPI application factory with MongoDB lifespan management.
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import router
+from app.db.mongo import close_mongo, connect_mongo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,14 +18,37 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Manage application lifecycle:
+    - Startup: Connect to MongoDB, create indexes, initialise per-user session store.
+    - Shutdown: Close MongoDB connection.
+    """
+    # ── Startup ────────────────────────────────────────────────────────────────
+    await connect_mongo(app)
+
+    # Per-user in-memory session store: { user_id_str: { "profile": Profile, "preferences_text": str | None } }
+    # Cleared on server restart — the MongoDB resume_cache handles persistence.
+    app.state.user_sessions = {}
+
+    logger.info("Application startup complete")
+    yield
+
+    # ── Shutdown ───────────────────────────────────────────────────────────────
+    await close_mongo(app)
+    logger.info("Application shutdown complete")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="AI Job Matcher",
-        description="Analyze job fit and generate ATS-optimized resumes using your profile.",
-        version="1.0.0",
+        title="JobSense",
+        description="Auth-protected, rate-limited job matching powered by Gemini AI.",
+        version="2.0.0",
+        lifespan=lifespan,
     )
 
-    # CORS — allow Vite dev server
+    # CORS — allow Vite dev server (credentials required for Bearer header)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -36,7 +60,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Global error handler for unexpected exceptions
+    # Global error handler for unhandled exceptions
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled exception on %s %s", request.method, request.url)
@@ -45,11 +69,16 @@ def create_app() -> FastAPI:
             content={"detail": "An unexpected internal error occurred."},
         )
 
-    app.include_router(router)
+    # Include routers
+    from app.api.auth_routes import router as auth_router
+    from app.api.routes import router as api_router
+
+    app.include_router(auth_router)
+    app.include_router(api_router)
 
     @app.get("/health")
     async def health_check():
-        return {"status": "ok"}
+        return {"status": "ok", "version": "2.0.0"}
 
     return app
 

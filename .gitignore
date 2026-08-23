@@ -81,3 +81,7 @@ coverage.xml
 *.bak
 *.tmp
 .turbo/
+
+# ─── User data files (personal — do not commit) ───────────────────────────────
+data/profile.md
+data/preferences.md

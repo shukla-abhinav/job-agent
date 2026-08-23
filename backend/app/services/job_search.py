@@ -17,6 +17,7 @@ import httpx
 
 from app.config import settings
 from app.models.job import JobListing, JobSearchResponse
+from app.models.profile import Profile
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,11 @@ def _parse_preferences(preferences_path: Path) -> dict:
         logger.warning("preferences.md not found at %s — using defaults", preferences_path)
         return {"roles": ["Senior Software Engineer"], "remote": True, "countries": ["United States"]}
 
+    return _parse_preferences_text(text)
+
+
+def _parse_preferences_text(text: str) -> dict:
+    """Parse raw preferences markdown text into a structured dict."""
     roles: list[str] = []
     roles_match = re.search(r"## Roles I'm Targeting\n(.*?)(?=\n##|\Z)", text, re.DOTALL)
     if roles_match:
@@ -93,14 +99,66 @@ def _parse_preferences(preferences_path: Path) -> dict:
 
 
 def _build_base_query(prefs: dict) -> str:
-    """Build the core role+location part of the search query."""
+    """Build the core role, resume-skill, and location part of the search query."""
     roles = prefs.get("roles", ["Senior Software Engineer"])[:2]
     role_query = " OR ".join(f'"{r}"' for r in roles)
+    skills = prefs.get("skills", [])[:3]
+    skill_query = " OR ".join(f'"{skill}"' for skill in skills)
+    query = f"({role_query})"
+    if skill_query:
+        query += f" ({skill_query})"
     if prefs.get("remote"):
-        return f"({role_query}) remote Python"
+        return f"{query} remote"
     countries = prefs.get("countries", [])[:2]
     location = " OR ".join(countries) if countries else "worldwide"
-    return f"({role_query}) Python {location}"
+    return f"{query} {location}"
+
+
+def _preferences_from_resume(profile: Profile) -> dict:
+    """Build a sensible job-search baseline from the active resume."""
+    roles = profile.preferred_roles[:]
+    if not roles:
+        roles = [entry.title for entry in profile.experience if entry.title]
+
+    # Domain expertise is usually more useful for job discovery than generic tools.
+    domain_skills: list[str] = []
+    other_skills: list[str] = []
+    for category, values in profile.skills.items():
+        target = domain_skills if any(word in category.lower() for word in ("domain", "expertise", "special")) else other_skills
+        target.extend(skill for skill in values if skill)
+
+    location = profile.personal_info.location.strip()
+    return {
+        "roles": roles or ["Professional"],
+        "skills": domain_skills or other_skills,
+        "remote": False,
+        "countries": profile.preferred_countries or ([location] if location else []),
+    }
+
+
+def _merge_resume_and_preferences(profile: Profile | None, preferences_text: str | None) -> dict:
+    """Use resume data as the baseline and let explicit preferences refine it."""
+    prefs = _preferences_from_resume(profile) if profile else {
+        "roles": ["Senior Software Engineer"],
+        "skills": [],
+        "remote": True,
+        "countries": ["United States"],
+    }
+
+    if preferences_text is None:
+        return prefs
+
+    explicit = _parse_preferences_text(preferences_text)
+    # A preference file expresses intent, so it supersedes inferred resume roles
+    # and location only when it contains the relevant section. Resume expertise
+    # remains in the query as matching context.
+    if re.search(r"## Roles I'm Targeting\n", preferences_text):
+        prefs["roles"] = explicit["roles"]
+    if "Remote" in preferences_text:
+        prefs["remote"] = explicit["remote"]
+    if re.search(r"## Preferred Countries", preferences_text):
+        prefs["countries"] = explicit["countries"]
+    return prefs
 
 
 def _build_site_filter(selected_sites: list[str], include_career_pages: bool) -> str:
@@ -275,15 +333,23 @@ async def search_jobs(
     site_mode: str = "trusted",           # "trusted" | "custom"
     selected_sites: list[str] | None = None,
     include_career_pages: bool = False,
+    preferences_text: str | None = None,  # In-session preferences (overrides file)
+    profile: Profile | None = None,
 ) -> JobSearchResponse:
-    """Main entry point — uses preferences.md to build query and fetch jobs."""
+    """Build a job search from the active resume, refined by preferences."""
     if not settings.serpapi_key:
         raise ValueError(
             "SERPAPI_KEY is not configured. Add SERPAPI_KEY=your_key to backend/.env. "
             "Get a free key at https://serpapi.com"
         )
 
-    prefs = _parse_preferences(settings.preferences_absolute_path)
+    # The active resume is the baseline. An uploaded preference file refines it.
+    # Keep the legacy on-disk preferences only for local development with no resume.
+    if profile is not None or preferences_text is not None:
+        prefs = _merge_resume_and_preferences(profile, preferences_text)
+    else:
+        prefs = _parse_preferences(settings.preferences_absolute_path)
+
     base_query = _build_base_query(prefs)
     logger.info("Job search base query: %r (mode=%s, page=%d)", base_query, site_mode, page)
 

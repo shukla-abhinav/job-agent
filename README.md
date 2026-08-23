@@ -1,4 +1,4 @@
-# AI Job Matcher
+# JobSense
 
 A personal AI-powered web application to determine whether you should apply for an international software engineering job.
 
