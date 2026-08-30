@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
+from typing import List
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -30,6 +31,14 @@ class Settings(BaseSettings):
     secret_key: str = os.getenv("SECRET_KEY", "change-me-in-production")
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 72
+
+    # CORS — comma-separated list of allowed origins, e.g. https://my-app.vercel.app
+    cors_origins_raw: str = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+
+    @property
+    def cors_origins(self) -> List[str]:
+        """Return the list of allowed CORS origins parsed from CORS_ORIGINS env var."""
+        return [o.strip() for o in self.cors_origins_raw.split(",") if o.strip()]
 
     # Rate limiting
     rate_limit_calls: int = 5
