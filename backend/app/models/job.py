@@ -11,8 +11,8 @@ class JobListing(BaseModel):
     company: str
     location: str
     description: str = ""
-    apply_url: str = ""
-    posted_date: Optional[str] = None
+    apply_link: Optional[str] = None
+    posted_at: Optional[str] = None
     salary: Optional[str] = None
     job_type: Optional[str] = None
     source: str = ""
@@ -34,10 +34,10 @@ class MatchRequest(BaseModel):
 
 class MatchResponse(BaseModel):
     score: int = Field(..., ge=0, le=100)
-    summary: str
+    reasoning: str
     strengths: list[str]
-    gaps: list[str]
-    recommendations: list[str]
+    missing_skills: list[str]
+    recommendation: str
 
 
 class ResumeRequest(BaseModel):
@@ -51,8 +51,9 @@ class ResumeResponse(BaseModel):
 
 class ResumeSuggestion(BaseModel):
     missing_keywords: list[str]
-    skills_to_highlight: list[str]
+    skills_to_add: list[str]
     sections_to_update: list[str]
+    summary_tips: list[str] = Field(default_factory=list)
     overall_advice: str
 
 

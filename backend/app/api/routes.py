@@ -67,15 +67,43 @@ router = APIRouter(prefix="/api")
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _load_profile_for_user(request: Request, user_id: str) -> Profile:
+async def _load_profile_for_user(
+    request: Request,
+    user_id: str,
+    db: AsyncIOMotorDatabase,
+) -> Profile:
     """
     Load profile for the given user.
-    Priority: in-memory session → disk fallback (dev only).
+    Priority: in-memory session → MongoDB cache → disk fallback (dev only).
+
+    On Vercel each serverless invocation starts with an empty app.state, so
+    we always fall through to MongoDB on the first request after a cold start.
     """
-    sessions: dict = getattr(request.app.state, "user_sessions", {})
-    session = sessions.get(user_id)
+    user_sessions: dict = getattr(request.app.state, "user_sessions", {})
+    session = user_sessions.get(user_id)
     if session and session.get("profile"):
         return session["profile"]
+
+    # Auto-load from MongoDB cache (same logic as session/status)
+    pref_doc = await db.user_preferences.find_one({"user_id": ObjectId(user_id)})
+    active_resume_oid = pref_doc.get("active_resume_id") if pref_doc else None
+
+    if active_resume_oid:
+        cached = await db.resume_cache.find_one(
+            {"_id": active_resume_oid, "user_id": ObjectId(user_id)},
+        )
+    else:
+        cached = await db.resume_cache.find_one(
+            {"user_id": ObjectId(user_id)},
+            sort=[("created_at", -1)],
+        )
+
+    if cached:
+        logger.info("Auto-loading cached profile for user=%s from MongoDB", user_id)
+        profile = _dict_to_profile(cached["profile_json"])
+        pref_text = pref_doc.get("preferences_text") if pref_doc else None
+        user_sessions[user_id] = {"profile": profile, "preferences_text": pref_text}
+        return profile
 
     # Dev fallback: data/profile.md
     try:
@@ -490,7 +518,7 @@ async def match_job(
     user_id: str = current_user["_id"]
     await check_rate_limit(db, user_id)
 
-    profile = _load_profile_for_user(request, user_id)
+    profile = await _load_profile_for_user(request, user_id, db)
     provider = get_gemini_provider()
 
     try:
@@ -520,7 +548,7 @@ async def generate_resume(
     user_id: str = current_user["_id"]
     await check_rate_limit(db, user_id)
 
-    profile = _load_profile_for_user(request, user_id)
+    profile = await _load_profile_for_user(request, user_id, db)
     provider = get_gemini_provider()
 
     try:
@@ -602,7 +630,7 @@ async def analyze_job_listing(
     user_id: str = current_user["_id"]
     await check_rate_limit(db, user_id)
 
-    profile = _load_profile_for_user(request, user_id)
+    profile = await _load_profile_for_user(request, user_id, db)
     provider = get_gemini_provider()
     job_text = f"Title: {job.title}\nCompany: {job.company}\nLocation: {job.location}\n\n{job.description}"
 
@@ -633,7 +661,7 @@ async def get_resume_suggestions(
     user_id: str = current_user["_id"]
     await check_rate_limit(db, user_id)
 
-    profile = _load_profile_for_user(request, user_id)
+    profile = await _load_profile_for_user(request, user_id, db)
     provider = get_gemini_provider()
 
     try:
@@ -663,7 +691,7 @@ async def build_tailored_resume(
     job = body.job
     job_text = f"Title: {job.title}\nCompany: {job.company}\nLocation: {job.location}\n\n{job.description}"
 
-    profile = _load_profile_for_user(request, user_id)
+    profile = await _load_profile_for_user(request, user_id, db)
     provider = get_gemini_provider()
 
     try:
@@ -687,8 +715,9 @@ async def build_tailored_resume(
 async def get_profile_info(
     request: Request,
     current_user: dict = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> PersonalInfo:
     """Return the user's personal information."""
     user_id: str = current_user["_id"]
-    profile = _load_profile_for_user(request, user_id)
+    profile = await _load_profile_for_user(request, user_id, db)
     return profile.personal_info
